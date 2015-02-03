@@ -75,8 +75,8 @@ struct contains {
 };
 
 /*
- * Find the Nth occurrence of Q in ShapePack. Requires that ShapePack actually
- * contain at least N Qs.
+ * Find the index of the Nth occurrence of Q in ShapePack. Requires that
+ * ShapePack actually contain at least N Qs.
  */
 template <size_t N, size_t Q, typename ShapePack, size_t match_count = 0, size_t cur_ind = 0>
 struct nth_match_index_in_pack {
@@ -93,6 +93,31 @@ struct nth_match_index_in_pack {
                 >::type,
             nth_match_index_in_pack<N, Q, ShapePack, match_count, cur_ind+1>
         >::type>::type::value;
+};
+/*
+ * Find the index of the Nth non-integral type in a type pack. Requires that
+ * the pack actually contain at least N non-integral types.
+ */
+template <size_t N, size_t match_count, size_t cur_ind, typename... Types>
+struct _nth_non_integral_index {
+    static_assert(N < sizeof...(Types) - count_integral<Types...>::value, "Pack does not contain sufficient non-integral types.");
+    static_assert((N >= 0) && (N < sizeof...(Types)), "Invalid pack index.");
+
+    static constexpr size_t value =
+        std::conditional<cur_ind == sizeof...(Types)-1,
+            std::integral_constant<size_t, cur_ind>,
+            typename std::conditional<!std::is_integral<typename nth_in_type_pack<cur_ind, Types...>::type>::value,
+                typename std::conditional<match_count == N,
+                    std::integral_constant<size_t, cur_ind>,
+                    _nth_non_integral_index<N, match_count+1, cur_ind+1, Types...>
+                >::type,
+            _nth_non_integral_index<N, match_count, cur_ind+1, Types...>
+        >::type>::type::value;
+};
+
+template <size_t N, typename... Types>
+struct nth_non_integral_index {
+    static constexpr size_t value = _nth_non_integral_index<N, 0, 0, Types...>::value;
 };
 
 /*
@@ -150,16 +175,17 @@ struct max_shape_pack {
 };
 
 // Placeholder for a full axis as a slice.
-struct all{};
+struct all{ static constexpr bool _is_slice = true; };
 template <typename T>
 static constexpr bool is_all(const T& t) { return std::is_same<typename std::decay<T>::type, all>::value; }
 
 template <typename Pack, typename... Slices>
 struct sliced_shape_pack {
-    static constexpr size_t len = Pack::len;
+    static constexpr size_t len = Pack::len - count_integral<Slices...>::value;
 
     template <size_t I>
-    static constexpr size_t __at(size_t i=I, typename std::enable_if<I < sizeof...(Slices), void*>::type = 0) {
+    static constexpr size_t __at(typename std::enable_if<I < sizeof...(Slices), void*>::type = 0) {
+        static_assert(I < Pack::len, "Invalid pack index.");
         return std::conditional<std::is_integral<typename nth_in_type_pack<I, Slices...>::type>::value,
                                                   std::integral_constant<size_t, 1>,
                                                   typename std::conditional<
@@ -170,12 +196,17 @@ struct sliced_shape_pack {
                                                  >::type::value;
     }
     template <size_t I>
-    static constexpr size_t __at(size_t i=I, typename std::enable_if<I >= sizeof...(Slices), void*>::type = 0) {
+    static constexpr size_t __at(typename std::enable_if<I >= sizeof...(Slices), void*>::type = 0) {
+        static_assert(I < Pack::len, "Invalid pack index.");
         return Pack::template at<I>;
     }
 
     template <size_t I>
-    static constexpr size_t at = __at<I>();
+    static constexpr size_t at = __at<
+    std::conditional<I < sizeof...(Slices) - count_integral<Slices...>::value,
+        nth_non_integral_index<I, Slices...>,
+        std::integral_constant<size_t, sizeof...(Slices)+I>
+    >::type::value>();
 };
 
 /*
@@ -211,6 +242,7 @@ struct is_ ## name { \
 
 make_trait_tester(expression);
 make_trait_tester(array);
+make_trait_tester(slice);
 
 /*
  * Macros for expression and scalar type traits.
@@ -218,7 +250,7 @@ make_trait_tester(array);
 #define enable_if_array(type) typename = std::enable_if_t<is_array<type>::value>
 #define enable_if_expression(type) typename = std::enable_if_t<is_expression<type>::value>
 #define is_array_or_expr(type) (is_array<type>::value || is_expression<type>::value)
-#define enable_if_array_or_expr(type) std::enable_if_t<is_array_or_expr(type)>
+#define enable_if_array_or_expr(type) typename = std::enable_if_t<is_array_or_expr(type)>
 #define enable_if_scalar(type) typename = std::enable_if_t<std::is_arithmetic<type>::value>
 #define enable_if_compatible(type1, type2) typename = std::enable_if_t<elementwise_compatible<type1, type2>::value>
 

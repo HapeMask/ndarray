@@ -5,6 +5,7 @@ namespace nda {
  * Range object, used for sliced indexing and index generation in for loops.
  */
 struct range {
+    static constexpr bool _is_slice = true;
     int start, stop, step;
 
     range() : start(-1), stop(-1), step(-1) {}
@@ -43,11 +44,6 @@ struct range {
 
 using slice = range;
 
-template <typename T>
-struct is_slice {
-    static constexpr bool value = std::is_same<typename std::decay<T>::type, slice>::value ||
-                                  std::is_same<typename std::decay<T>::type, all>::value;
-};
 template <typename T, typename... Ts>
 struct all_integral_or_slice {
     static constexpr bool value = (std::is_integral<T>::value || is_slice<T>::value) && all_integral_or_slice<Ts...>::value;
@@ -69,82 +65,98 @@ template<typename I0>
 slice _index_to_slice(const I0& i0, typename std::enable_if<is_slice<I0>::value, void*>::type = 0) {
     return i0;
 }
-template <typename T, typename I0, typename... Indices>
-void _indices_to_slices(T& slices, int n, const I0& i0, const Indices&... inds) {
+template <size_t S, typename I0, typename... Indices>
+void _convert_indices(std::array<slice, S>& slices, std::array<bool, S>& ind_types, int n, const I0& i0, const Indices&... inds) {
     slices[n] = _index_to_slice(i0);
-    _indices_to_slices(slices, n+1, inds...);
+    ind_types[n] = is_slice<I0>::value;
+    _convert_indices(slices, ind_types, n+1, inds...);
 }
-template <typename T, typename I0>
-void _indices_to_slices(T& slices, int n, const I0& i0) {
+template <size_t S, typename I0>
+void _convert_indices(std::array<slice, S>& slices, std::array<bool, S>& ind_types, int n, const I0& i0) {
     slices[n] = _index_to_slice(i0);
+    ind_types[n] = is_slice<I0>::value;
 }
 
-template <typename Arr, typename... Slices>
+template <typename Expr, typename... Slices>
 struct slice_expr {
-    using value_type = typename Arr::value_type;
-    using shape_type = sliced_shape_pack<typename Arr::shape_type, Slices...>;
-    using array_ref = typename std::conditional<std::is_const<Arr>::value, const Arr&, Arr&>::type;
+    using value_type = typename Expr::value_type;
+    using shape_type = sliced_shape_pack<typename Expr::shape_type, Slices...>;
+    using expr_ref = typename std::conditional<std::is_const<Expr>::value, const Expr&, Expr&>::type;
     static constexpr bool _is_expression = true;
     static constexpr bool _is_array = true;
-    static constexpr size_t ndim = Arr::ndim;
+    static constexpr size_t ndim = Expr::ndim - count_integral<Slices...>::value;
+    static constexpr size_t fulldim = Expr::ndim;
 
-    array_ref arr;
-    std::array<slice, ndim> _slices;
-    std::array<size_t, ndim> _shape;
+    expr_ref expr;
+    std::array<slice, fulldim> _slices = {};
+    std::array<bool, fulldim> dim_preserved = {};
+    std::array<size_t, ndim> sliced_dims = {};
+    std::array<size_t, ndim> _shape = {};
     size_t _size;
 
     const size_t& size() const { return _size; }
     const std::array<size_t, ndim>& shape() const { return _shape; }
 
-    template<enable_if_array(Arr)>
-    slice_expr(array_ref a, const Slices&... slices) : arr(a) {
-        const auto& a_shp = arr.shape();
-        std::array<slice, Arr::ndim> s;
-        _indices_to_slices(s, 0, slices...);
+    template<enable_if_array_or_expr(Expr)>
+    slice_expr(expr_ref e, const Slices&... slices) : expr(e) {
+        const auto& a_shp = expr.shape();
+        std::array<slice, fulldim> converted_slices;
+        for(int i=0; i<fulldim; ++i) { dim_preserved[i] = true; }
+        _convert_indices(converted_slices, dim_preserved, 0, slices...);
 
         _size = 1;
-        for(int i=0; i < ndim; ++i) {
-            _slices[i] = (is_all(s[i]) || s[i]==slice()) ? slice(a_shp[i]) : s[i];
-            _shape[i] = _slices[i].len();
-            _size *= _shape[i];
+        int si = 0;
+        for(int i=0; i<fulldim; ++i) {
+            const auto& sl = converted_slices[i];
+            if( dim_preserved[i] ) {
+                _slices[i] = (sl == slice()) ? slice(a_shp[i]) : sl;
+                _shape[si] = _slices[i].len();
+                _size *= _shape[si];
+                sliced_dims[si] = i;
+                ++si;
+            } else {
+                _slices[i] = sl;
+            }
         }
     }
 
     template <typename... Is, typename = std::enable_if_t<all_integral<Is...>::value>>
-    const value_type& operator()(Is... i) const {
-        const std::array<int, ndim> slice_inds{i...};
-        std::array<size_t, ndim> inds;
-        for(int j=0; j < ndim; ++j) {
-            assert(slice_inds[j] < _shape[j] && "Invalid index.");
-            inds[j] = *(_slices[j].begin() + slice_inds[j]);
-        }
-        return arr(inds);
+    const value_type& operator()(Is... is) const {
+        return (*this)({static_cast<size_t>(is)...});
     }
     template <typename... Is, typename = std::enable_if_t<all_integral<Is...>::value>>
-    value_type& operator()(Is... i) {
-        const std::array<int, ndim> slice_inds{i...};
-        std::array<size_t, ndim> inds;
-        for(int j=0; j<ndim; ++j) {
-            assert(slice_inds[j] < _shape[j] && "Invalid index.");
-            inds[j] = *(_slices[j].begin() + slice_inds[j]);
-        }
-        return arr(inds);
+    value_type& operator()(Is... is) {
+        static_assert(sizeof...(Is) == ndim, "Insufficient indices.");
+
+        return (*this)({static_cast<size_t>(is)...});
     }
     const value_type& operator()(const std::array<size_t, ndim>& slice_inds) const {
-        std::array<size_t, ndim> inds;
-        for(int j=0; j<ndim; ++j) {
-            assert(slice_inds[j] < _shape[j] && "Invalid index.");
-            inds[j] = *(_slices[j].begin() + slice_inds[j]);
+        std::array<size_t, fulldim> inds;
+        int si = 0;
+        for(int i=0; i < fulldim; ++i) {
+            if( dim_preserved[i] ) {
+                assert(slice_inds[si] < _shape[i] && "Invalid index.");
+                inds[i] = *(_slices[i].begin() + slice_inds[si]);
+                ++si;
+            } else {
+                inds[i] = _slices[i].start;
+            }
         }
-        return arr(inds);
+        return expr(inds);
     }
     value_type& operator()(const std::array<size_t, ndim>& slice_inds) {
-        std::array<size_t, ndim> inds;
-        for(int j=0; j<ndim; ++j) {
-            assert(slice_inds[j] < _shape[j] && "Invalid index.");
-            inds[j] = *(_slices[j].begin() + slice_inds[j]);
+        std::array<size_t, fulldim> inds;
+        int si = 0;
+        for(int i=0; i < fulldim; ++i) {
+            if( dim_preserved[i] ) {
+                assert(slice_inds[si] < _shape[i] && "Invalid index.");
+                inds[i] = *(_slices[i].begin() + slice_inds[si]);
+                ++si;
+            } else {
+                inds[i] = _slices[i].start;
+            }
         }
-        return arr(inds);
+        return expr(inds);
     }
 
     slice_expr& operator=(const value_type& v) {
@@ -164,7 +176,6 @@ struct slice_expr {
         const value_type& operator*() const { return expr(cur_pos); }
 
         bool operator==(const iterator& other) const {
-            assert(other.expr.arr.data == expr.arr.data && "Cannot compare iterators from different array instances.");
             bool equal = true;
             for(int i=0; i<ndim; ++i) {
                 equal = equal && (cur_pos[i] == other.cur_pos[i]);
