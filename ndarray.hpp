@@ -415,16 +415,30 @@ class nda_impl {
 template <typename T, size_t... Shape>
 using ndarray = nda_impl<T, shape_pack<Shape...>>;
 
+template <typename ArrExpr>
+using array_like = nda_impl<typename ArrExpr::value_type, typename ArrExpr::shape_type>;
 } // END namespace nda
 
-template <typename T, typename Shape, typename = std::enable_if_t<Shape::len == 2>>
-std::ostream& operator<<(std::ostream& out, const nda::nda_impl<T, Shape>& arr) {
-    for(size_t i=0; i < arr.shape()[0]; ++i) {
-        for(size_t j=0; j < arr.shape()[1]; ++j) {
-            out << arr(i, j);
-            if(j < arr.shape()[1]-1) { out << "\t"; }
+template <typename Expr>
+typename std::enable_if<is_array_or_expr(Expr) && Expr::ndim == 2,
+std::ostream&>::type
+operator<<(std::ostream& out, const Expr& expr) {
+    for(size_t i=0; i < expr.shape()[0]; ++i) {
+        for(size_t j=0; j < expr.shape()[1]; ++j) {
+            out << expr(i, j);
+            if(j < expr.shape()[1]-1) { out << "\t"; }
         }
-        if(i < arr.shape()[0]-1) { out << std::endl; }
+        if(i < expr.shape()[0]-1) { out << std::endl; }
+    }
+    return out;
+}
+template <typename Expr>
+typename std::enable_if<is_array_or_expr(Expr) && Expr::ndim == 1,
+std::ostream&>::type
+operator<<(std::ostream& out, const Expr& expr) {
+    for(size_t i=0; i < expr.shape()[0]; ++i) {
+        out << expr(i);
+        if(i < expr.shape()[0]-1) { out << "\t"; }
     }
     return out;
 }
