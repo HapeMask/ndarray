@@ -7,41 +7,13 @@
 #include <type_traits>
 
 #include "type_tools.hpp"
+#include "slicing.hpp"
 
 //////////////////////
 // RANGE
 //////////////////////
 
 namespace nda {
-/*
- * Range object, used for sliced indexing and index generation in for loops.
- */
-struct range {
-    range(int sto) : start(0), stop(sto), step(1), cur(0) {}
-    range(int sta, int sto, int ste=1) : start(sta), stop(sto), step(ste), cur(sta) {}
-
-    const int& operator*() const { return cur; }
-    range& operator++() { cur += step; return *this; }
-    range operator++(int) { range tmp = *this;  cur += step; return tmp; }
-
-    range& operator*=(int o) { cur += o*step; return *this; }
-    range operator*(int o) { return range(*this) *= o; }
-
-    range& operator/=(int o) { cur -= o*step; return *this; }
-    range operator/(int o) { return range(*this) /= o; }
-
-    bool operator==(const range& other) const { return *other == cur; }
-    bool operator!=(const range& other) const { return !(this->operator==(other)); }
-
-    operator int() const { return cur; }
-
-    int len() const { return (stop - start) / step + ((((stop-start)%step) == 0) ? 0 : 1); }
-
-    range begin() const { return range(start, stop, step); }
-    range end() const { range r(start, stop, step); r.cur = start + len()*step; return r; }
-
-    int start, stop, step, cur;
-};
 
 /*
  * Ensures instances of any two types with shape() methods have matching
@@ -70,6 +42,7 @@ class nda_impl {
     public:
         using value_type = T;
         using shape_type = ShapePack;
+        static constexpr bool _is_array = true;
 
         static constexpr size_t ndim = ShapePack::len;
         size_t _size;
@@ -200,9 +173,19 @@ class nda_impl {
         ////////////////////////////////////
         //  Expression Template Constructor
         ////////////////////////////////////
-        template <typename Expr, enable_if_expression(Expr),
-         typename = std::enable_if_t<elementwise_compatible<ShapePack, typename Expr::shape_type>::value>>
-        nda_impl(const Expr&& ex) : _size(ex.size()), _shape(ex.shape()) {
+        template <typename Expr,
+                 enable_if_expression(Expr),
+                 enable_if_compatible(ShapePack, typename Expr::shape_type)>
+        nda_impl(const Expr& ex) {
+            fill_array<ShapePack>(_shape);
+            for(int i=0; i<ndim; ++i) {
+                if (_shape[i] == DYNAMIC_SHAPE) { _shape[i] = ex.shape()[i]; }
+            }
+            _compute_size();
+
+            assert(shape_match(_shape, ex.shape()));
+            assert(_size == ex.size());
+
             _compute_basic_strides();
             _alloc_data();
 
@@ -276,8 +259,14 @@ class nda_impl {
         ////////////////////////////////////
         template <typename Expr, enable_if_expression(Expr)>
         nda_impl& operator=(const Expr& ex) {
-            _size = ex.size();
-            _shape = ex.shape();
+            fill_array<ShapePack>(_shape);
+            for(int i=0; i<ndim; ++i) {
+                if (_shape[i] == DYNAMIC_SHAPE) { _shape[i] = ex.shape()[i]; }
+            }
+            _compute_size();
+            assert(shape_match(_shape, ex.shape()));
+            assert(_size == ex.size());
+
             _compute_basic_strides();
             _alloc_data();
 
@@ -300,14 +289,13 @@ class nda_impl {
         /////////////////////
         //  Access Operators
         /////////////////////
-        template <typename... Indices, typename = std::enable_if_t<all_integral<Indices...>::value>>
+        template <typename... Indices, typename = std::enable_if_t<sizeof...(Indices) == ndim && all_integral<Indices...>::value>>
         const T& operator()(const Indices&... indices) const {
             static_assert(sizeof...(Indices) == ndim, "Incorrect number of indices.");
             return data[_compute_index(indices...)];
         }
-        template <typename... Indices, typename = std::enable_if_t<all_integral<Indices...>::value>>
+        template <typename... Indices, typename = std::enable_if_t<sizeof...(Indices) == ndim && all_integral<Indices...>::value>>
         T& operator()(const Indices&... indices) {
-            static_assert(sizeof...(Indices) == ndim, "Incorrect number of indices.");
             return data[_compute_index(indices...)];
         }
         const T& operator()(const std::array<size_t, ndim>& ind_arr) const {
@@ -315,6 +303,18 @@ class nda_impl {
         }
         T& operator()(const std::array<size_t, ndim>& ind_arr) {
             return data[_compute_index(ind_arr)];
+        }
+
+        /*
+         * Slice access operator (returns a slice expression).
+         */
+        template <typename... Slices, typename = std::enable_if_t<!all_integral<Slices...>::value || (sizeof...(Slices) < ndim && all_integral_or_slice<Slices...>::value)>>
+        slice_expr<const nda_impl<T, ShapePack>, Slices...> operator()(const Slices&... slices) const {
+            return {*this, slices...};
+        }
+        template <typename... Slices, typename = std::enable_if_t<!all_integral<Slices...>::value || (sizeof...(Slices) < ndim && all_integral_or_slice<Slices...>::value)>>
+        slice_expr<nda_impl<T, ShapePack>, Slices...> operator()(const Slices&... slices) {
+            return {*this, slices...};
         }
 
         //////////////////
@@ -404,7 +404,9 @@ class nda_impl {
         }
         template <typename... Indices>
         size_t _compute_index(const size_t& i0, const Indices&... indices) const {
-            return i0 * _strides[ndim - sizeof...(Indices) - 1] + _compute_index(indices...);
+            const size_t ind = i0 * _strides[ndim - sizeof...(Indices) - 1] + _compute_index(indices...);
+            assert(ind < _size && "Index out of range.");
+            return ind;
         }
 
         size_t _compute_index() const { return 0; }
@@ -424,13 +426,5 @@ std::ostream& operator<<(std::ostream& out, const nda::nda_impl<T, Shape>& arr) 
         }
         if(i < arr.shape()[0]-1) { out << std::endl; }
     }
-    return out;
-}
-
-template<typename T, typename = decltype(T().begin())>
-std::ostream& operator<<(std::ostream& out, const T& iterable) {
-    out << "( ";
-    for (const auto& i : iterable) { out << i << " "; }
-    out << ")";
     return out;
 }

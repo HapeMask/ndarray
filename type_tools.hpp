@@ -15,27 +15,44 @@
  */
 constexpr size_t DYNAMIC_SHAPE = 0;
 
-template <size_t N, size_t I, size_t... Is>
-struct nth_in_pack {
-    static constexpr size_t value = nth_in_pack<N-1, Is...>::value;
+template <typename T, typename... Ts>
+struct count_integral {
+    static constexpr size_t value = count_integral<Ts...>::value + (std::is_integral<T>::value ? 1 : 0);
+};
+template <typename T>
+struct count_integral<T> {
+    static constexpr size_t value = std::is_integral<T>::value ? 1 : 0;
 };
 
+template <size_t N, size_t I, size_t... Is>
+struct nth_in_size_pack {
+    static constexpr size_t value = nth_in_size_pack<N-1, Is...>::value;
+};
 template <size_t I, size_t... Is>
-struct nth_in_pack<0, I, Is...> {
+struct nth_in_size_pack<0, I, Is...> {
     static constexpr size_t value = I;
+};
+
+template <size_t N, typename T, typename... Ts>
+struct nth_in_type_pack {
+    static_assert((N-1) < sizeof...(Ts), "Invalid pack index.");
+    using type = typename nth_in_type_pack<N-1, Ts...>::type;
+};
+template <typename T, typename... Ts>
+struct nth_in_type_pack<0, T, Ts...> {
+    using type = T;
 };
 
 template <size_t N, size_t... Is>
 inline constexpr size_t _at() {
     static_assert((N >= 0) && (N < sizeof...(Is)), "Invalid pack index.");
-    return nth_in_pack<N, Is...>::value;
+    return nth_in_size_pack<N, Is...>::value;
 }
 
 template <typename T, typename... Ts>
 struct all_integral {
     static constexpr bool value = std::is_integral<T>::value && all_integral<Ts...>::value;
 };
-
 template <typename T>
 struct all_integral<T> {
     static constexpr bool value = std::is_integral<T>::value;
@@ -132,6 +149,35 @@ struct max_shape_pack {
     static constexpr size_t at = tmax<Pack1::template at<I>, Pack2::template at<I>>();
 };
 
+// Placeholder for a full axis as a slice.
+struct all{};
+template <typename T>
+static constexpr bool is_all(const T& t) { return std::is_same<typename std::decay<T>::type, all>::value; }
+
+template <typename Pack, typename... Slices>
+struct sliced_shape_pack {
+    static constexpr size_t len = Pack::len;
+
+    template <size_t I>
+    static constexpr size_t __at(size_t i=I, typename std::enable_if<I < sizeof...(Slices), void*>::type = 0) {
+        return std::conditional<std::is_integral<typename nth_in_type_pack<I, Slices...>::type>::value,
+                                                  std::integral_constant<size_t, 1>,
+                                                  typename std::conditional<
+                                                      std::is_same<typename std::decay<typename nth_in_type_pack<I, Slices...>::type>::type, all>::value,
+                                                      std::integral_constant<size_t, Pack::template at<I>>,
+                                                      std::integral_constant<size_t, 0>
+                                                  >::type
+                                                 >::type::value;
+    }
+    template <size_t I>
+    static constexpr size_t __at(size_t i=I, typename std::enable_if<I >= sizeof...(Slices), void*>::type = 0) {
+        return Pack::template at<I>;
+    }
+
+    template <size_t I>
+    static constexpr size_t at = __at<I>();
+};
+
 /*
  * Fill an std::array with values from a shape pack.
  */
@@ -154,11 +200,27 @@ void fill_array(std::array<size_t, ShapePack::len>& arr) {
 
 }
 
+#define make_trait_tester(name) static constexpr bool _is_ ## name(...) { return false; } \
+template <typename T> \
+static constexpr auto _is_ ## name(T* t) -> decltype(T::_is_ ## name) \
+{ return T::_is_ ## name; } \
+template <typename T> \
+struct is_ ## name { \
+    static constexpr bool value = _is_ ## name((T*)0); \
+}
+
+make_trait_tester(expression);
+make_trait_tester(array);
+
 /*
  * Macros for expression and scalar type traits.
  */
-#define enable_if_expression(type) typename = std::enable_if_t<type::is_expression>
+#define enable_if_array(type) typename = std::enable_if_t<is_array<type>::value>
+#define enable_if_expression(type) typename = std::enable_if_t<is_expression<type>::value>
+#define is_array_or_expr(type) (is_array<type>::value || is_expression<type>::value)
+#define enable_if_array_or_expr(type) std::enable_if_t<is_array_or_expr(type)>
 #define enable_if_scalar(type) typename = std::enable_if_t<std::is_arithmetic<type>::value>
+#define enable_if_compatible(type1, type2) typename = std::enable_if_t<elementwise_compatible<type1, type2>::value>
 
 /*
  * Demangle the name of a type. Useful for debugging.
