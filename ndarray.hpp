@@ -420,25 +420,41 @@ using array_like = nda_impl<typename ArrExpr::value_type, typename ArrExpr::shap
 } // END namespace nda
 
 template <typename Expr>
-typename std::enable_if<is_array_or_expr(Expr) && Expr::ndim == 2,
-std::ostream&>::type
-operator<<(std::ostream& out, const Expr& expr) {
-    for(size_t i=0; i < expr.shape()[0]; ++i) {
-        for(size_t j=0; j < expr.shape()[1]; ++j) {
-            out << expr(i, j);
-            if(j < expr.shape()[1]-1) { out << "\t"; }
-        }
-        if(i < expr.shape()[0]-1) { out << std::endl; }
-    }
-    return out;
-}
-template <typename Expr>
 typename std::enable_if<is_array_or_expr(Expr) && Expr::ndim == 1,
 std::ostream&>::type
 operator<<(std::ostream& out, const Expr& expr) {
+    out << "[";
     for(size_t i=0; i < expr.shape()[0]; ++i) {
         out << expr(i);
-        if(i < expr.shape()[0]-1) { out << "\t"; }
+        if(i < expr.shape()[0]-1) { out << "    "; }
+    }
+    out << "]";
+    return out;
+}
+
+template <typename Expr>
+typename std::enable_if<is_array_or_expr(Expr) && Expr::ndim == 2,
+std::ostream&>::type
+operator<<(std::ostream& out, const Expr& expr) {
+    out << "[";
+    for(size_t i=0; i < expr.shape()[0]; ++i) {
+        if(i > 0) {out << " ";}
+        out << expr(i);
+        if(i < expr.shape()[0]-1) { out << std::endl; }
+    }
+    out << "]";
+    return out;
+}
+
+template <typename Expr>
+typename std::enable_if<is_array_or_expr(Expr) && (Expr::ndim > 2),
+std::ostream&>::type
+operator<<(std::ostream& out, const Expr& expr) {
+    for(size_t i=0; i < expr.shape()[0]; ++i) {
+        out << "[";
+        out << expr(i);
+        out << "]";
+        if(i < expr.shape()[0]-1) { out << std::endl; }
     }
     return out;
 }
