@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iostream>
+#include <cstring>
 #include <string>
 #include <array>
 #include <cassert>
@@ -21,19 +22,21 @@ struct is_ ## trait { \
     static constexpr bool value = _is_ ## trait((typename std::decay<T>::type*)0); \
 }
 
-make_trait_tester(expression);
-make_trait_tester(constant);
-make_trait_tester(array);
-make_trait_tester(slice);
+namespace nda {
+    make_trait_tester(expression);
+    make_trait_tester(constant);
+    make_trait_tester(array);
+    make_trait_tester(slice);
 
-template <typename T, typename... Ts>
-struct contains_slice {
-    static constexpr bool value = is_slice<T>::value || contains_slice<Ts...>::value;
-};
-template <typename T>
-struct contains_slice<T> {
-    static constexpr bool value = is_slice<T>::value;
-};
+    template <typename T, typename... Ts>
+    struct contains_slice {
+        static constexpr bool value = is_slice<T>::value || contains_slice<Ts...>::value;
+    };
+    template <typename T>
+    struct contains_slice<T> {
+        static constexpr bool value = is_slice<T>::value;
+    };
+}
 
 /*
  * Macros for expression and scalar type traits.
@@ -296,8 +299,6 @@ struct constant {
     size_t size() const { return expr.size(); }
     std::array<size_t, ndim> shape() const { return expr.shape(); }
 
-    //const T& operator()(const std::array<size_t, ndim>& inds) const { return value; }
-
     explicit constant(const T& t, const Expr& e) : value(t), expr(e)
     {}
 
@@ -347,10 +348,6 @@ struct elemwise_binary_expr {
         assert(l.size() == r.size());
         assert(shape_match(l.shape(), r.shape()));
     }
-
-    //value_type operator()(const std::array<size_t, ndim>& inds) const {
-    //    return Op::eval(lhs(inds), rhs(inds));
-    //}
 
     /*
      * Iterator access is provided to evaluate the expression for use in array
@@ -687,7 +684,7 @@ struct slice_expr {
      * Slice access operator (returns another slice expression).
      */
     template <typename... Slices2, typename = std::enable_if_t<is_slicing_pack(slice_expr, Slices2)>>
-    slice_expr<const slice_expr<Expr, Slices...>, Slices2...> operator()(const Slices2&... slices2) const {
+    const slice_expr<const slice_expr<const Expr, Slices...>, Slices2...> operator()(const Slices2&... slices2) const {
         return {*this, slices2...};
     }
     template <typename... Slices2, typename = std::enable_if_t<is_slicing_pack(slice_expr, Slices2)>>
@@ -695,24 +692,28 @@ struct slice_expr {
         return {*this, slices2...};
     }
 
-    template<typename E = Expr>//, typename std::enable_if_t<is_array<E>::value>>
-    slice_expr& operator=(const value_type v) {
+    template<typename E = Expr>
+    typename std::enable_if<is_array<E>::value, slice_expr&>::type
+    operator=(const value_type v) {
         for(auto it = begin(); it != end(); ++it) { (*it) = v; }
         return *this;
     }
 
-    template <typename E>
+    template <typename E, bool Mutable>
     struct iterator {
         E expr;
 
         // The {} is required to value-initialize the array with zeroes.
         std::array<size_t, ndim> cur_pos{};
 
-        iterator(E& e) : expr(e) { }
-        iterator(E& e, const std::array<size_t, ndim>& p) : expr(e), cur_pos(p) {}
+        iterator(E e) : expr(e) { }
+        iterator(E e, const std::array<size_t, ndim>& p) : expr(e), cur_pos(p) {}
 
         const_access_type operator*() const { return expr(cur_pos); }
-        access_type operator*() { return expr(this->cur_pos); }
+
+        template<bool M = Mutable>
+        typename std::enable_if<M, access_type>::type
+        operator*() { return expr(this->cur_pos); }
 
         bool operator==(const iterator& other) const {
             bool equal = true;
@@ -771,8 +772,8 @@ struct slice_expr {
         }
     };
 
-    using const_iterator = iterator<const slice_expr&>;
-    using mutable_iterator = iterator<slice_expr&>;
+    using const_iterator = iterator<const slice_expr&, false>;
+    using mutable_iterator = iterator<slice_expr&, true>;
 
     const_iterator begin() const { return const_iterator(*this); }
     const_iterator end() const { return const_iterator(*this, _shape); }
@@ -956,7 +957,7 @@ class nda_impl {
             _alloc_data();
 
             auto it = begin();
-            for(auto x : ex){
+            for(const auto x : ex){
                 (*it) = x;
                 ++it;
             }
@@ -1077,7 +1078,7 @@ class nda_impl {
          */
         template <typename... Slices>
         typename std::enable_if<is_slicing_pack(nda_impl, Slices), 
-        slice_expr<const nda_impl<T, ShapePack>, Slices...>>::type
+        const slice_expr<const nda_impl<T, ShapePack>, Slices...>>::type
             operator()(const Slices&... slices) const {
             return {*this, slices...};
         }
@@ -1191,7 +1192,7 @@ using array_like = nda_impl<typename ArrExpr::value_type, typename ArrExpr::shap
 } // END namespace nda
 
 template <typename Expr>
-typename std::enable_if<is_expression<Expr>::value && Expr::ndim == 1,
+typename std::enable_if<nda::is_expression<Expr>::value && Expr::ndim == 1,
 std::ostream&>::type
 operator<<(std::ostream& out, const Expr& expr) {
     out << "[";
@@ -1204,7 +1205,7 @@ operator<<(std::ostream& out, const Expr& expr) {
 }
 
 template <typename Expr>
-typename std::enable_if<is_expression<Expr>::value && Expr::ndim == 2,
+typename std::enable_if<nda::is_expression<Expr>::value && Expr::ndim == 2,
 std::ostream&>::type
 operator<<(std::ostream& out, const Expr& expr) {
     out << "[";
@@ -1218,7 +1219,7 @@ operator<<(std::ostream& out, const Expr& expr) {
 }
 
 template <typename Expr>
-typename std::enable_if<is_expression<Expr>::value && (Expr::ndim > 2),
+typename std::enable_if<nda::is_expression<Expr>::value && (Expr::ndim > 2),
 std::ostream&>::type
 operator<<(std::ostream& out, const Expr& expr) {
     for(size_t i=0; i < expr.shape()[0]; ++i) {
