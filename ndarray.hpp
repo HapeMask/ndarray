@@ -10,6 +10,13 @@
 #include <initializer_list>
 #include "cxxabi.h"
 
+namespace std {
+#ifndef enable_if_t
+template <bool Cond, typename T = void*>
+using enable_if_t = typename enable_if<Cond, T>::type;
+#endif
+}
+
 #define is_slicing_pack(Expr, Slices) (contains_slice<Slices...>::value || (sizeof...(Slices) < Expr::ndim && all_integral<Slices...>::value))
 #define is_non_slicing_pack(Expr, Slices) (sizeof...(Slices) == Expr::ndim && all_integral<Slices...>::value)
 
@@ -21,6 +28,15 @@ template <typename T> \
 struct is_ ## trait { \
     static constexpr bool value = _is_ ## trait((typename std::decay<T>::type*)0); \
 }
+
+/*
+ * Macros for expression and scalar type traits.
+ */
+#define enable_if_array(type) typename = std::enable_if_t<is_array<type>::value>
+#define enable_if_expression(type) typename = std::enable_if_t<is_expression<type>::value>
+#define enable_if_scalar(type) typename = std::enable_if_t<std::is_arithmetic<type>::value>
+#define shape_compatible(type1, type2) elementwise_compatible<type1, type2>::value
+#define requires(condition) typename std::enable_if<condition, void*>::type __ = 0
 
 namespace nda {
     make_trait_tester(expression);
@@ -37,16 +53,6 @@ namespace nda {
         static constexpr bool value = is_slice<T>::value;
     };
 }
-
-/*
- * Macros for expression and scalar type traits.
- */
-#define enable_if_array(type) typename = std::enable_if_t<is_array<type>::value>
-#define enable_if_expression(type) typename = std::enable_if_t<is_expression<type>::value>
-#define is_array_or_expr(type) (is_array<type>::value || is_expression<type>::value)
-#define enable_if_array_or_expr(type) typename = std::enable_if_t<is_array_or_expr(type)>
-#define enable_if_scalar(type) typename = std::enable_if_t<std::is_arithmetic<type>::value>
-#define enable_if_compatible(type1, type2) typename = std::enable_if_t<elementwise_compatible<type1, type2>::value>
 
 /*
  * Template metaprogramming tools for manipulating variadic non-type template
@@ -154,6 +160,12 @@ struct nth_non_integral_index {
     static constexpr size_t value = _nth_non_integral_index<N, 0, 0, Types...>::value;
 };
 
+template <size_t A, size_t B>
+constexpr size_t tmax() { return ((A>B) ? A : B); }
+
+template <size_t A, size_t B>
+constexpr size_t tmin() { return ((A<B) ? A : B); }
+
 /*
  * Checks each dimension in a pair of shape packs to make sure they match for
  * elementwise operations (including copy construction and assignment).
@@ -161,23 +173,25 @@ struct nth_non_integral_index {
  * Dynamic dimensions match with any other dimension, they are checked at
  * runtime.
  */
-template <typename Pack1, typename Pack2, size_t I = Pack1::len-1>
+template <typename Pack1, typename Pack2, size_t I = tmin<Pack1::len, Pack2::len>()-1>
 struct elementwise_compatible {
     static constexpr bool value = std::conditional<Pack1::len == Pack2::len,
                                    std::integral_constant<bool,
                                    ((Pack1::template at<I> == Pack2::template at<I>) ||
-                                   (Pack1::template at<I> == DYNAMIC_SHAPE) ||
-                                   (Pack2::template at<I> == DYNAMIC_SHAPE)) &&
+                                    (Pack1::template at<I> == DYNAMIC_SHAPE) ||
+                                    (Pack2::template at<I> == DYNAMIC_SHAPE)) &&
                                    elementwise_compatible<Pack1, Pack2, I-1>::value>,
                                    std::false_type>::type::value;
 
 };
 template <typename Pack1, typename Pack2>
 struct elementwise_compatible<Pack1, Pack2, 0> {
-    static constexpr bool value = Pack1::len == Pack2::len &&
+    static constexpr bool value = std::conditional<Pack1::len == Pack2::len,
+                                  std::integral_constant<bool,
                                   ((Pack1::template at<0> == Pack2::template at<0>) ||
                                    (Pack1::template at<0> == DYNAMIC_SHAPE) ||
-                                   (Pack2::template at<0> == DYNAMIC_SHAPE));
+                                   (Pack2::template at<0> == DYNAMIC_SHAPE))>,
+                                  std::false_type>::type::value;
 };
 
 /*
@@ -191,8 +205,13 @@ struct shape_pack {
     static constexpr size_t at = _at<I, Shape...>();
 };
 
-template <size_t A, size_t B>
-constexpr size_t tmax() { return ((A>B) ? A : B); }
+template<size_t Ndim>
+struct universal_shape_pack {
+    static constexpr size_t len = Ndim;
+
+    template <size_t I>
+    static constexpr size_t at = 0;
+};
 
 /*
  * A shape pack representing the elementwise maximum between two shape packs.
@@ -218,7 +237,7 @@ struct sliced_shape_pack {
     static constexpr size_t len = Pack::len - count_integral<Slices...>::value;
 
     template <size_t I>
-    static constexpr size_t __at(typename std::enable_if<I < sizeof...(Slices), void*>::type = 0) {
+    static constexpr size_t __at(requires(I < sizeof...(Slices))) {
         static_assert(I < Pack::len, "Invalid pack index.");
         return std::conditional<std::is_integral<typename nth_in_type_pack<I, Slices...>::type>::value,
                                                   std::integral_constant<size_t, 1>,
@@ -230,7 +249,7 @@ struct sliced_shape_pack {
                                                  >::type::value;
     }
     template <size_t I>
-    static constexpr size_t __at(typename std::enable_if<I >= sizeof...(Slices), void*>::type = 0) {
+    static constexpr size_t __at(requires(I >= sizeof...(Slices))) {
         static_assert(I < Pack::len, "Invalid pack index.");
         return Pack::template at<I>;
     }
@@ -241,6 +260,17 @@ struct sliced_shape_pack {
         nth_non_integral_index<I, Slices...>,
         std::integral_constant<size_t, sizeof...(Slices)+I>
     >::type::value>();
+};
+
+template <typename Pack, size_t Axis>
+struct sum_shape_pack {
+    static constexpr size_t len = Pack::len - 1;
+
+    template <size_t I>
+    static constexpr size_t at = std::conditional<I < Axis,
+                         std::integral_constant<size_t, Pack::template at<I>>,
+                         std::integral_constant<size_t, Pack::template at<I+1>>
+                     >::type::value;
 };
 
 /*
@@ -576,11 +606,11 @@ using slice = range;
  * list of slices.
  */
 template<typename I0>
-slice _index_to_slice(const I0& i0, typename std::enable_if<std::is_integral<I0>::value, void*>::type = 0) {
+slice _index_to_slice(const I0& i0, requires(std::is_integral<I0>::value)) {
     return slice(i0, i0+1);
 }
 template<typename I0>
-slice _index_to_slice(const I0& i0, typename std::enable_if<is_slice<I0>::value, void*>::type = 0) {
+slice _index_to_slice(const I0& i0, requires(is_slice<I0>::value)) {
     return i0;
 }
 template <size_t S, typename I0, typename... Indices>
@@ -595,6 +625,84 @@ void _convert_indices(std::array<slice, S>& slices, std::array<bool, S>& ind_typ
     ind_types[n] = is_slice<I0>::value;
 }
 
+template <typename Expr, bool Mutable>
+struct fancy_iterator {
+    using expr_ref = typename std::conditional<Mutable, Expr&, const Expr&>::type;
+    using access_type = typename Expr::access_type;
+    using const_access_type = typename Expr::const_access_type;
+    static constexpr size_t ndim = Expr::ndim;
+
+    expr_ref expr;
+
+    // The {} is required to value-initialize the array with zeroes.
+    std::array<size_t, ndim> cur_pos{};
+
+    fancy_iterator(expr_ref e) : expr(e) { }
+    fancy_iterator(expr_ref e, const std::array<size_t, ndim>& p) : expr(e), cur_pos(p) {}
+
+    const_access_type operator*() const { return expr(cur_pos); }
+
+    template<bool M = Mutable>
+    typename std::enable_if<M, access_type>::type
+    operator*() { return expr(this->cur_pos); }
+
+    bool operator==(const fancy_iterator& other) const {
+        bool equal = true;
+        for(int i=0; i<ndim; ++i) {
+            equal = equal && (cur_pos[i] == other.cur_pos[i]);
+        }
+        return equal;
+    }
+    bool operator!=(const fancy_iterator& other) const { return !(this->operator==(other)); }
+
+    fancy_iterator& operator++() {
+        int carries = 0;
+        for(int i=ndim-1; i>=0; --i) {
+            if(cur_pos[i] < expr.shape()[i]-1) {
+                ++cur_pos[i];
+                break;
+            } else {
+                cur_pos[i] = 0;
+                ++carries;
+            }
+        }
+
+        if (carries == ndim) {
+            cur_pos = expr.shape();
+        }
+        return *this;
+    }
+
+    fancy_iterator& operator--() {
+        int zeros = 0;
+        for(int i=ndim-1; i>=0; --i) {
+            if(cur_pos[i] > 0) {
+                --cur_pos[i];
+                break;
+            } else {
+                cur_pos[i] = expr.shape()[i]-1;
+                ++zeros;
+            }
+        }
+
+        if (zeros == ndim) {
+            cur_pos = expr.shape();
+        }
+        return *this;
+    }
+
+    fancy_iterator operator++(int) {
+        fancy_iterator copy(*this);
+        ++(*this);
+        return copy;
+    }
+    fancy_iterator operator--(int) {
+        fancy_iterator copy(*this);
+        --(*this);
+        return copy;
+    }
+};
+
 template <typename Expr, typename... Slices>
 struct slice_expr {
     // Sliced arrays are still arrays, other expressions are not.
@@ -608,34 +716,32 @@ struct slice_expr {
     using expr_ref = typename std::conditional<std::is_const<Expr>::value, const Expr&, Expr&>::type;
 
     static constexpr size_t ndim = Expr::ndim - count_integral<Slices...>::value;
-    static constexpr size_t fulldim = Expr::ndim;
+    static constexpr size_t old_ndim = Expr::ndim;
 
     expr_ref expr;
-    std::array<slice, fulldim> _slices = {};
-    std::array<bool, fulldim> dim_preserved = {};
-    std::array<size_t, ndim> sliced_dims = {};
+    std::array<slice, old_ndim> _slices = {};
+    std::array<bool, old_ndim> dim_preserved = {};
     std::array<size_t, ndim> _shape = {};
     size_t _size;
 
     const size_t& size() const { return _size; }
     const std::array<size_t, ndim>& shape() const { return _shape; }
 
-    template<enable_if_array_or_expr(Expr)>
+    template <enable_if_expression(Expr)>
     slice_expr(expr_ref e, const Slices&... slices) : expr(e) {
         const auto& a_shp = expr.shape();
-        std::array<slice, fulldim> converted_slices;
-        for(int i=0; i<fulldim; ++i) { dim_preserved[i] = true; }
+        std::array<slice, old_ndim> converted_slices;
+        for(int i=0; i<old_ndim; ++i) { dim_preserved[i] = true; }
         _convert_indices(converted_slices, dim_preserved, 0, slices...);
 
         _size = 1;
         int si = 0;
-        for(int i=0; i<fulldim; ++i) {
+        for(int i=0; i<old_ndim; ++i) {
             const auto& sl = converted_slices[i];
             if( dim_preserved[i] ) {
                 _slices[i] = (sl == slice()) ? slice(a_shp[i]) : sl;
                 _shape[si] = _slices[i].len();
                 _size *= _shape[si];
-                sliced_dims[si] = i;
                 ++si;
             } else {
                 _slices[i] = sl;
@@ -643,18 +749,18 @@ struct slice_expr {
         }
     }
 
-    template <typename... Is, typename = std::enable_if_t<sizeof...(Is) == ndim && all_integral<Is...>::value>>
+    template <typename... Is, typename = std::enable_if_t<is_non_slicing_pack(slice_expr, Is)>>
     const_access_type operator()(Is... is) const {
         return (*this)({{static_cast<size_t>(is)}...});
     }
-    template <typename... Is, typename = std::enable_if_t<sizeof...(Is) == ndim && all_integral<Is...>::value>>
+    template <typename... Is, typename = std::enable_if_t<is_non_slicing_pack(slice_expr, Is)>>
     access_type operator()(Is... is) {
         return (*this)({{static_cast<size_t>(is)}...});
     }
     const_access_type operator()(const std::array<size_t, ndim>& slice_inds) const {
-        std::array<size_t, fulldim> inds;
+        std::array<size_t, old_ndim> inds;
         int si = 0;
-        for(int i=0; i < fulldim; ++i) {
+        for(int i=0; i < old_ndim; ++i) {
             if( dim_preserved[i] ) {
                 assert(slice_inds[si] < _shape[i] && "Invalid index.");
                 inds[i] = *(_slices[i].begin() + slice_inds[si]);
@@ -666,9 +772,9 @@ struct slice_expr {
         return expr(inds);
     }
     access_type operator()(const std::array<size_t, ndim>& slice_inds) {
-        std::array<size_t, fulldim> inds;
+        std::array<size_t, old_ndim> inds;
         int si = 0;
-        for(int i=0; i < fulldim; ++i) {
+        for(int i=0; i < old_ndim; ++i) {
             if( dim_preserved[i] ) {
                 assert(slice_inds[si] < _shape[i] && "Invalid index.");
                 inds[i] = *(_slices[i].begin() + slice_inds[si]);
@@ -684,7 +790,7 @@ struct slice_expr {
      * Slice access operator (returns another slice expression).
      */
     template <typename... Slices2, typename = std::enable_if_t<is_slicing_pack(slice_expr, Slices2)>>
-    const slice_expr<const slice_expr<const Expr, Slices...>, Slices2...> operator()(const Slices2&... slices2) const {
+    slice_expr<const slice_expr<Expr, Slices...>, Slices2...> operator()(const Slices2&... slices2) const {
         return {*this, slices2...};
     }
     template <typename... Slices2, typename = std::enable_if_t<is_slicing_pack(slice_expr, Slices2)>>
@@ -699,86 +805,76 @@ struct slice_expr {
         return *this;
     }
 
-    template <typename E, bool Mutable>
-    struct iterator {
-        E expr;
-
-        // The {} is required to value-initialize the array with zeroes.
-        std::array<size_t, ndim> cur_pos{};
-
-        iterator(E e) : expr(e) { }
-        iterator(E e, const std::array<size_t, ndim>& p) : expr(e), cur_pos(p) {}
-
-        const_access_type operator*() const { return expr(cur_pos); }
-
-        template<bool M = Mutable>
-        typename std::enable_if<M, access_type>::type
-        operator*() { return expr(this->cur_pos); }
-
-        bool operator==(const iterator& other) const {
-            bool equal = true;
-            for(int i=0; i<ndim; ++i) {
-                equal = equal && (cur_pos[i] == other.cur_pos[i]);
-            }
-            return equal;
-        }
-        bool operator!=(const iterator& other) const { return !(this->operator==(other)); }
-
-        iterator& operator++() {
-            int carries = 0;
-            for(int i=ndim-1; i>=0; --i) {
-                if(cur_pos[i] < expr.shape()[i]-1) {
-                    ++cur_pos[i];
-                    break;
-                } else {
-                    cur_pos[i] = 0;
-                    ++carries;
-                }
-            }
-
-            if (carries == ndim) {
-                cur_pos = expr.shape();
-            }
-            return *this;
-        }
-
-        iterator& operator--() {
-            int zeros = 0;
-            for(int i=ndim-1; i>=0; --i) {
-                if(cur_pos[i] > 0) {
-                    --cur_pos[i];
-                    break;
-                } else {
-                    cur_pos[i] = expr.shape()[i]-1;
-                    ++zeros;
-                }
-            }
-
-            if (zeros == ndim) {
-                cur_pos = expr.shape();
-            }
-            return *this;
-        }
-
-        iterator operator++(int) {
-            iterator copy(*this);
-            ++(*this);
-            return copy;
-        }
-        iterator operator--(int) {
-            iterator copy(*this);
-            --(*this);
-            return copy;
-        }
-    };
-
-    using const_iterator = iterator<const slice_expr&, false>;
-    using mutable_iterator = iterator<slice_expr&, true>;
+    using const_iterator = fancy_iterator<const slice_expr&, false>;
+    using mutable_iterator = fancy_iterator<slice_expr&, true>;
 
     const_iterator begin() const { return const_iterator(*this); }
     const_iterator end() const { return const_iterator(*this, _shape); }
     mutable_iterator begin() { return mutable_iterator(*this); }
     mutable_iterator end() { return mutable_iterator(*this, _shape); }
+};
+
+template <typename Expr, size_t Axis>
+struct sum_expr {
+    static_assert(Axis < Expr::ndim, "Invalid sum axis.");
+    static constexpr bool _is_expression = true;
+
+    using value_type = typename Expr::value_type;
+    using shape_type = sum_shape_pack<typename Expr::shape_type, Axis>;
+    using expr_ref = typename std::conditional<std::is_const<Expr>::value, const Expr&, Expr&>::type;
+    using access_type = value_type;
+    using const_access_type = value_type;
+
+    static constexpr size_t ndim = Expr::ndim - 1;
+    static constexpr size_t old_ndim = Expr::ndim;
+
+    expr_ref expr;
+    std::array<size_t, ndim> _shape;
+    size_t _size;
+
+    const size_t& size() const { return _size; }
+    const std::array<size_t, ndim>& shape() const { return _shape; }
+
+    sum_expr(expr_ref e, requires(is_expression<Expr>::value)) : expr(e) {
+        fill_array<shape_type>(_shape);
+        _size = 1;
+        for(int i=0; i<ndim; ++i) { _size *= _shape[i]; }
+    }
+
+    template <typename... Is, typename = std::enable_if_t<is_non_slicing_pack(sum_expr, Is)>>
+    const_access_type operator()(Is... is) const {
+        return (*this)({{static_cast<size_t>(is)}...});
+    }
+    const_access_type operator()(const std::array<size_t, ndim>& inds) const {
+        std::array<size_t, old_ndim> old_inds = {};
+        for(size_t i=0; i<old_ndim; ++i) {
+            if(i < Axis) {
+                old_inds[i] = inds[i];
+            } else if(i > Axis) {
+                old_inds[i] = inds[i-1];
+            }
+        }
+
+        access_type sum = 0;
+        for(size_t i=0; i < expr.shape()[Axis]; ++i) {
+            sum += expr(old_inds);
+            old_inds[Axis]++;
+        }
+        return sum;
+    }
+
+    /*
+     * Slice access operator (returns a slice expression).
+     */
+    template <typename... Slices, typename = std::enable_if_t<is_slicing_pack(sum_expr, Slices)>>
+    slice_expr<const sum_expr<Expr, Axis>, Slices...> operator()(const Slices&... slices) const {
+        return {*this, slices...};
+    }
+
+    using const_iterator = fancy_iterator<const sum_expr, false>;
+
+    const_iterator begin() const { return const_iterator(*this); }
+    const_iterator end() const { return const_iterator(*this, _shape); }
 };
 
 /*
@@ -878,11 +974,9 @@ class nda_impl {
             memcpy(data, other.data, _size*sizeof(T));
         }
         template <typename OShape>
-        nda_impl(const nda_impl<T, OShape>& other) : _size(other._size), _strides(other._strides), _shape(other._shape)
+        nda_impl(const nda_impl<T, OShape>& other, requires(shape_compatible(ShapePack, OShape))) :
+        _size(other._size), _strides(other._strides), _shape(other._shape)
         {
-            static_assert(elementwise_compatible<ShapePack, OShape>::value,
-                    "Shapes must match for all fixed dimensions.");
-
             if(!has_fixed_shape) {
                 assert(shape_match(_shape, other._shape));
             }
@@ -907,13 +1001,14 @@ class nda_impl {
         }
 
         template <typename OShape>
-        nda_impl(nda_impl<T, OShape>&& other) : _size(other._size),
+        nda_impl(nda_impl<T, OShape>&& other, requires(shape_compatible(ShapePack, OShape))) :
+                                                _size(other._size),
                                                 _strides(other._strides),
                                                 _shape(other._shape),
                                                 data(other.data)
         {
-            static_assert(elementwise_compatible<ShapePack, OShape>::value,
-                    "Shapes must match for all known dimensions.");
+            //static_assert(elementwise_compatible<ShapePack, OShape>::value,
+            //        "Shapes must match for all known dimensions.");
 
             if(!has_fixed_shape) {
                 assert(shape_match(_shape, other._shape));
@@ -922,9 +1017,12 @@ class nda_impl {
             other.data = nullptr;
         }
 
-        ///////////////////////////////
-        //  Dynamic Shape Constructor
-        ///////////////////////////////
+        static constexpr size_t n_dynamic_dims = count_in<DYNAMIC_SHAPE, ShapePack>::value;
+        static constexpr bool has_fixed_shape = (n_dynamic_dims == 0);
+
+        ///////////////////////////////////////////////////////
+        //  Dynamic Shape Constructor (variadic template args)
+        ///////////////////////////////////////////////////////
         template <typename... DynShapes, typename = std::enable_if_t<all_integral<DynShapes...>::value>>
         nda_impl(const DynShapes&... dynamic_shapes) {
             static_assert(n_dynamic_dims > 0, "Tried to call dynamic shape constructor with no dynamic dims.");
@@ -937,13 +1035,24 @@ class nda_impl {
             _alloc_data();
         }
 
+        /////////////////////////////////////////////
+        //  Dynamic Shape Constructor (shape array)
+        /////////////////////////////////////////////
+        nda_impl(const std::array<size_t, n_dynamic_dims>& dynshapes) {
+            // TODO: remove this limitation.
+            static_assert(n_dynamic_dims == ndim, "TODO: FIXME");
+            _shape = dynshapes;
+            _compute_size();
+            _compute_basic_strides();
+            _alloc_data();
+        }
+
         ////////////////////////////////////
         //  Expression Template Constructor
         ////////////////////////////////////
-        template <typename Expr,
-                 enable_if_expression(Expr),
-                 enable_if_compatible(ShapePack, typename Expr::shape_type)>
-        nda_impl(const Expr& ex) {
+        template <typename Expr, enable_if_expression(Expr)>
+        nda_impl(const Expr& ex, requires(shape_compatible(ShapePack, typename Expr::shape_type))) {
+
             fill_array<ShapePack>(_shape);
             for(int i=0; i<ndim; ++i) {
                 if (_shape[i] == DYNAMIC_SHAPE) { _shape[i] = ex.shape()[i]; }
@@ -1078,7 +1187,7 @@ class nda_impl {
          */
         template <typename... Slices>
         typename std::enable_if<is_slicing_pack(nda_impl, Slices), 
-        const slice_expr<const nda_impl<T, ShapePack>, Slices...>>::type
+        slice_expr<const nda_impl<T, ShapePack>, Slices...>>::type
             operator()(const Slices&... slices) const {
             return {*this, slices...};
         }
@@ -1115,10 +1224,6 @@ class nda_impl {
         }
 
     private:
-        static constexpr size_t n_dynamic_dims = count_in<DYNAMIC_SHAPE, ShapePack>::value;
-        static constexpr size_t n_static_dims = ndim - n_dynamic_dims;
-        static constexpr bool has_fixed_shape = (n_dynamic_dims == 0);
-
         /*
          * Given a list of runtime shapes, fill in the missing dynamic values
          * in the _shapes array.
