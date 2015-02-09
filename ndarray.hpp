@@ -10,13 +10,6 @@
 #include <initializer_list>
 #include "cxxabi.h"
 
-namespace std {
-#ifndef enable_if_t
-template <bool Cond, typename T = void*>
-using enable_if_t = typename enable_if<Cond, T>::type;
-#endif
-}
-
 #define is_slicing_pack(Expr, Slices) (contains_slice<Slices...>::value || (sizeof...(Slices) < Expr::ndim && all_integral<Slices...>::value))
 #define is_non_slicing_pack(Expr, Slices) (sizeof...(Slices) == Expr::ndim && all_integral<Slices...>::value)
 
@@ -237,7 +230,7 @@ struct sliced_shape_pack {
     static constexpr size_t len = Pack::len - count_integral<Slices...>::value;
 
     template <size_t I>
-    static constexpr size_t __at(requires(I < sizeof...(Slices))) {
+    static constexpr size_t ___at(requires(I < sizeof...(Slices))) {
         static_assert(I < Pack::len, "Invalid pack index.");
         return std::conditional<std::is_integral<typename nth_in_type_pack<I, Slices...>::type>::value,
                                                   std::integral_constant<size_t, 1>,
@@ -249,17 +242,22 @@ struct sliced_shape_pack {
                                                  >::type::value;
     }
     template <size_t I>
-    static constexpr size_t __at(requires(I >= sizeof...(Slices))) {
+    static constexpr size_t ___at(requires(I >= sizeof...(Slices))) {
         static_assert(I < Pack::len, "Invalid pack index.");
         return Pack::template at<I>;
     }
 
     template <size_t I>
-    static constexpr size_t at = __at<
-    std::conditional<I < sizeof...(Slices) - count_integral<Slices...>::value,
-        nth_non_integral_index<I, Slices...>,
-        std::integral_constant<size_t, sizeof...(Slices)+I>
-    >::type::value>();
+    static constexpr size_t __at() {
+        static_assert(I < len, "Invalid pack index.");
+        return ___at<std::conditional<I < (sizeof...(Slices) - count_integral<Slices...>::value),
+                nth_non_integral_index<I, Slices...>,
+                std::integral_constant<size_t, I>
+            >::type::value>();
+    }
+
+    template <size_t I>
+    static constexpr size_t at = __at<I>();
 };
 
 template <typename Pack, size_t Axis>
@@ -805,8 +803,8 @@ struct slice_expr {
         return *this;
     }
 
-    using const_iterator = fancy_iterator<const slice_expr&, false>;
-    using mutable_iterator = fancy_iterator<slice_expr&, true>;
+    using const_iterator = fancy_iterator<const slice_expr, false>;
+    using mutable_iterator = fancy_iterator<slice_expr, true>;
 
     const_iterator begin() const { return const_iterator(*this); }
     const_iterator end() const { return const_iterator(*this, _shape); }
